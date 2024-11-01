@@ -1,25 +1,179 @@
 ---
-title: "Tropwater_waterholes_analysis"
-format: html
+title: "Hoefer et al. 2024 – PAM in Mammals"
+author: "Sebastian Hoefer"
+date: today
+title-block-banner: "#161616"
+title-block-banner-color: "white"
+format:
+  html:
+    embed-resources: true
+    grid: 
+      body-width: 2000px
+      sidebar-width: 200px
+      margin-width: 300px
+    toc: true
+    toc-title: \deftocheading{toc}{}
+    toc-depth: 6
+    toc-location: right
+    toc-expand: 1
+    code-overflow: wrap
+    code-block-bg: "F2F2F2"
+    code-block-border-left: "#4A9D9E"
+    highlight-style: github
+    theme: darkly
+    knitr:
+      opts_chunk: 
+        R.options:
+          width: 120
+standalone: true
 ---
 
-## Quarto
+# Load packages
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+Load packages needed for data manipulation and analyses.
 
 ```{r}
-1 + 1
+#| include: false
+#| echo: true
+
+library(tidyverse)    # Data wrangling and visualization
+library(readxl)
+library(janitor)
+
+
+library(colorspace)   # Color manipulation
+library(cmdstanr)     # Interface to 'CmdStan'
+library(brms)         # Bayesian regression models
+library(rstan)        # Interface to Stan
+library(ggeffects)    # Marginal effects plots
+library(DHARMa)       # Residual diagnostics
+library(emmeans)      # Estimated marginal means
+library(tidybayes)    # Tidy data for Bayesian models
+library(vegan)        # Community ecology analysis
+library(EcolUtils)    # Ecology utilities
+library(patchwork)    # Combine ggplots
+library(svglite)      # Save figures as SVG files
+library(HDInterval)   # HPD intervals
+library(report)       # Automated reporting
+library(ggsignif)     # Significance levels in ggplot
+library(ggimage)      # Images in ggplot
+library(cowplot)      # Plot composition in ggplot
+library(scales)       # Manipulate axis labels
 ```
 
-You can add options to executable code like this 
+# Functions
+
+Custom ggplot theme for visualisation.
 
 ```{r}
-#| echo: false
-2 * 2
+my.theme <- function(){
+  theme_classic() +
+    theme(text = element_text(family = "Avenir Next"),
+          axis.title.y = element_text(margin = margin(t = 0,r = 20,b = 0,l = 0)),
+          axis.title.x = element_text(margin = margin(t = 20,r = 0,b = 0,l = 0)), 
+          plot.margin = unit(c(5, 10, 5, 10), units = "mm"),
+          strip.background = element_rect(fill = "#CCCCFF"),
+          strip.text.x = element_text(size = 20),
+          axis.title = element_text(size = 20),
+          axis.text = element_text(size = 18),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 15))
+}
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+# Prepare data
+
+## Survey data
+
+```{r}
+searches <- read_xlsx("../data/raw/Trip Nov-Dec 2023 tropwater data.xlsx", sheet = "searches") |>  
+  mutate(start = sub("(\\d+)(\\d{2})", "\\1:\\2", start),
+         end = sub("(\\d+)(\\d{2})", "\\1:\\2", end),
+         time = sub("(\\d+)(\\d{2})", "\\1:\\2", time))
+
+incidentals <- read_xlsx("../data/raw/Trip Nov-Dec 2023 tropwater data.xlsx", sheet = "incidentals")  |>  
+  mutate(time = sub("(\\d+)(\\d{2})", "\\1:\\2", time))
+
+sp_reference <- read_csv("../data/processed/database.csv")
+```
+
+Clean up naming inconsistencies and remove unknown species IDs
+
+```{r}
+#| warning: false
+
+#Active searches
+searches_clean <- searches |> 
+  filter(!common.name %in% c("Friarbird", "Fairywren", "Flying fox", "Honeyeater", "Kite", "Macropod", "Microbat", "recording 108", "Cuckooshrike", "Whipsnake")) |> 
+  mutate(common.name = fct_recode(common.name,
+                          "Australian Magpie" = "Australian magpie",
+                          "Barking Owl" = "Barking owl",
+                          "Cane Toad" = "Cane toad",
+                          "Pacific Koel" = "Koel",
+                          "Northern Velvet Gecko" = "Oedura castelnaui",
+                          "Cape York Spotted Python" = "Spotted python")) |> 
+  left_join(sp_reference, by = "scientific.name", suffix = c("", ".sci")) |>
+  mutate(common.name = coalesce(common.name, common.name.sci)) |>
+  left_join(sp_reference, by = "common.name", suffix = c("", ".com")) |> 
+  mutate(scientific.name = coalesce(scientific.name, scientific.name.com),
+         class = coalesce(class, class.com),
+         genus = coalesce(genus, genus.com),
+         family = coalesce(family, family.com)) |>
+  select(-ends_with(c(".sci", ".com")), -Notes)
+
+#Incidentals
+incidentals_clean <- incidentals |> 
+  filter(!common.name %in% c("Monitor", "Wallaroo", "Dragon", "monitor", "Crocodiles")) |> 
+  mutate(common.name = fct_recode(common.name,
+                          "Emu" = "emu",
+                          "Short-beaked Echidna" = "Echidna",
+                          "Sahul Sunbird" = "Olive-backed Sunbird",
+                          "European Rabbit" = "Rabbit",
+                          "Australian Bustard" = "Australian bustard",
+                          "Grey-crowned Babbler" = "Grey-crowned babbler")) |> 
+  left_join(sp_reference, by = "scientific.name", suffix = c("", ".sci")) |>
+  mutate(common.name = coalesce(common.name, common.name.sci)) |>
+  left_join(sp_reference, by = "common.name", suffix = c("", ".com")) |> 
+  mutate(scientific.name = coalesce(scientific.name, scientific.name.com),
+         class = coalesce(class, class.com),
+         genus = coalesce(genus, genus.com),
+         family = coalesce(family, family.com)) |>
+  select(-ends_with(c(".sci", ".com")), -Notes)
+```
+
+Merge cleaned data frames.
+
+```{r}
+trip1 <- merge(searches_clean, incidentals_clean, all = TRUE) %>%
+  add_column(trip = "trip1") |> 
+  mutate(assessment.method = case_when(
+    survey.type == "Birding" ~ "birding",
+    survey.type == "Spotlight" ~ "spotlighting",
+    TRUE ~ "incidentals")) |> 
+  uncount(number) |> 
+  select(date, plot, time, location, detection, common.name, scientific.name, genus, family, class,assessment.method,trip, participants,
+         temperature.C, barometric.pressure.mbar, `cloud cover.%`, max.wind.kmh, average.wind.kmh, `humidity.%`, rain, start, end, regenerated.tail, notes)
+```
+
+Save cleaned and merged data frame.
+
+```{r}
+write_csv(trip1, "../data/processed/data_trip1.csv")
+```
+
+# SPECIES RICHNESS
+
+## Load data
+
+```{r}
+tropwater_data <- read_csv("../data/processed/data_trip1.csv")
+```
+
+```{r}
+ggplot(tropwater_data, aes(class, fill = plot)) +
+  geom_bar()
+```
+
+
+
+
