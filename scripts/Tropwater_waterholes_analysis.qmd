@@ -37,8 +37,13 @@ Load packages needed for data manipulation and analyses.
 #| echo: true
 
 library(tidyverse)    # Data wrangling and visualization
-library(readxl)
-library(janitor)
+#library(readxl)
+#library(janitor)
+library(patchwork)    # Combine ggplots
+library(fossil)       # Chao2 calculations
+#library(sf)           # For FrogID SDM extractions
+#library(galah)        # For ALA record extractions
+library(mvabund)
 
 
 library(colorspace)   # Color manipulation
@@ -51,7 +56,6 @@ library(emmeans)      # Estimated marginal means
 library(tidybayes)    # Tidy data for Bayesian models
 library(vegan)        # Community ecology analysis
 library(EcolUtils)    # Ecology utilities
-library(patchwork)    # Combine ggplots
 library(svglite)      # Save figures as SVG files
 library(HDInterval)   # HPD intervals
 library(report)       # Automated reporting
@@ -85,14 +89,16 @@ my.theme <- function(){
 
 ## Survey data
 
+### Trip 1
+
 ```{r}
 searches <- read_xlsx("../data/raw/Trip Nov-Dec 2023 tropwater data.xlsx", sheet = "searches") |>  
-  mutate(start = sub("(\\d+)(\\d{2})", "\\1:\\2", start),
-         end = sub("(\\d+)(\\d{2})", "\\1:\\2", end),
-         time = sub("(\\d+)(\\d{2})", "\\1:\\2", time))
+  mutate(across(c(start, end, time), 
+                ~str_pad(sub("(\\d+)(\\d{2})", "\\1:\\2", .), 
+                        width = 5, side = "left", pad = "0")))
 
 incidentals <- read_xlsx("../data/raw/Trip Nov-Dec 2023 tropwater data.xlsx", sheet = "incidentals")  |>  
-  mutate(time = sub("(\\d+)(\\d{2})", "\\1:\\2", time))
+  mutate(time = str_pad(sub("(\\d+)(\\d{2})", "\\1:\\2", time), width = 5, side = "left", pad = "0"))
 
 sp_reference <- read_csv("../data/processed/database.csv")
 ```
@@ -111,7 +117,8 @@ searches_clean <- searches |>
                           "Cane Toad" = "Cane toad",
                           "Pacific Koel" = "Koel",
                           "Northern Velvet Gecko" = "Oedura castelnaui",
-                          "Cape York Spotted Python" = "Spotted python")) |> 
+                          "Cape York Spotted Python" = "Spotted python",
+                          "Australian Boobook" = "Southern Boobook")) |> 
   left_join(sp_reference, by = "scientific.name", suffix = c("", ".sci")) |>
   mutate(common.name = coalesce(common.name, common.name.sci)) |>
   left_join(sp_reference, by = "common.name", suffix = c("", ".com")) |> 
@@ -119,7 +126,7 @@ searches_clean <- searches |>
          class = coalesce(class, class.com),
          genus = coalesce(genus, genus.com),
          family = coalesce(family, family.com)) |>
-  select(-ends_with(c(".sci", ".com")), -Notes)
+  select(-ends_with(c(".sci", ".com")))
 
 #Incidentals
 incidentals_clean <- incidentals |> 
@@ -138,20 +145,26 @@ incidentals_clean <- incidentals |>
          class = coalesce(class, class.com),
          genus = coalesce(genus, genus.com),
          family = coalesce(family, family.com)) |>
-  select(-ends_with(c(".sci", ".com")), -Notes)
+  select(-ends_with(c(".sci", ".com")))
 ```
 
 Merge cleaned data frames.
 
 ```{r}
 trip1 <- merge(searches_clean, incidentals_clean, all = TRUE) %>%
-  add_column(trip = "trip1") |> 
-  mutate(assessment.method = case_when(
+  add_column(season = "wet",
+             trip = "trip1") |> 
+  mutate(date.time = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M"),
+    assessment.method = case_when(
     survey.type == "Birding" ~ "birding",
     survey.type == "Spotlight" ~ "spotlighting",
-    TRUE ~ "incidentals")) |> 
+    TRUE ~ "incidentals"),
+    site = case_when(
+      plot %in% c("11","76","99","103", "107") ~ "wet_site",
+      plot %in% c("23","40", "50", "70", "101") ~ "dry_site",
+      TRUE ~ plot)) |> 
   uncount(number) |> 
-  select(date, plot, time, location, detection, common.name, scientific.name, genus, family, class,assessment.method,trip, participants,
+  select(date.time, date, time, site, plot, location, detection, common.name, scientific.name, genus, family, class,assessment.method,season,trip, participants,
          temperature.C, barometric.pressure.mbar, `cloud cover.%`, max.wind.kmh, average.wind.kmh, `humidity.%`, rain, start, end, regenerated.tail, notes)
 ```
 
@@ -161,19 +174,948 @@ Save cleaned and merged data frame.
 write_csv(trip1, "../data/processed/data_trip1.csv")
 ```
 
-# SPECIES RICHNESS
+### Trip 2
+
+```{r}
+searches <- read_xlsx("../data/raw/Trip 2 (Jul 2024).xlsx", sheet = "searches") |>  
+  mutate(across(c(start, end, time), 
+                ~str_pad(sub("(\\d+)(\\d{2})", "\\1:\\2", .), 
+                        width = 5, side = "left", pad = "0")))
+
+incidentals <- read_xlsx("../data/raw/Trip 2 (Jul 2024).xlsx", sheet = "incidentals")  |>  
+  mutate(time = str_pad(sub("(\\d+)(\\d{2})", "\\1:\\2", time), width = 5, side = "left", pad = "0"))
+
+sp_reference <- read_csv("../data/processed/database.csv")
+```
+
+Clean up naming inconsistencies and remove unknown species IDs
+
+```{r}
+#| warning: false
+
+#Active searches
+searches_clean <- searches |> 
+  filter(!common.name %in% c("Rosella", "Microbat", "Macropod","recording 119", "recording 121","Friarbird" ,"Duck", "Honeyeater")) |> 
+  mutate(common.name = str_to_title(common.name),
+         common.name = str_replace_all(common.name, "-\\w+", tolower),
+         common.name = fct_recode(common.name,
+                          "Sahul Sunbird" = "Sunbird",
+                          "Australian Boobook" = "Southern Boobook",
+                          "Willie-wagtail" = "Willie Wagtail",
+                          "Little Bronze-Cuckoo" = "Little Bronze Cuckoo",
+                          "Green Tree Frog" = "Australian Green Treefrog",
+                          "Domestic Cattle" = "Cow",
+                          "Red-tailed Black-Cockatoo" = "Red-tailed Black Cockatoo")) |> 
+  left_join(sp_reference, by = "scientific.name", suffix = c("", ".sci")) |>
+  mutate(common.name = coalesce(common.name, common.name.sci)) |>
+  left_join(sp_reference, by = "common.name", suffix = c("", ".com")) |> 
+  mutate(scientific.name = coalesce(scientific.name, scientific.name.com),
+         class = coalesce(class, class.com),
+         genus = coalesce(genus, genus.com),
+         family = coalesce(family, family.com)) |>
+  select(-ends_with(c(".sci", ".com")))
+
+#Incidentals
+incidentals_clean <- incidentals |> 
+  mutate(common.name = str_to_title(common.name),
+         common.name = str_replace_all(common.name, "-\\w+", tolower),
+         common.name = fct_recode(common.name,
+                                  "Yellow-spotted Goanna" = "Yellow-spotted Monitor",
+                                  "White-bellied Sea-Eagle" = "White-bellied Sea Eagle")) |> 
+  left_join(sp_reference, by = "scientific.name", suffix = c("", ".sci")) |>
+  mutate(common.name = coalesce(common.name, common.name.sci)) |>
+  left_join(sp_reference, by = "common.name", suffix = c("", ".com")) |> 
+  mutate(scientific.name = coalesce(scientific.name, scientific.name.com),
+         class = coalesce(class, class.com),
+         genus = coalesce(genus, genus.com),
+         family = coalesce(family, family.com)) |>
+  select(-ends_with(c(".sci", ".com"))) |> 
+  filter(!scientific.name %in% c("Cryptoblepharus", "Demansia"))
+```
+
+Merge cleaned data frames.
+
+```{r}
+trip2 <- merge(searches_clean, incidentals_clean, all = TRUE) %>%
+  add_column(season = "wet",
+             trip = "trip2") |> 
+  mutate(date.time = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M"),
+    assessment.method = case_when(
+    survey.type == "Birding" ~ "birding",
+    survey.type == "Spotlight" ~ "spotlighting",
+    TRUE ~ "incidentals"),
+    site = case_when(
+      plot %in% c("11","76","99","103", "107") ~ "wet_site",
+      plot %in% c("23","40", "50", "70", "101") ~ "dry_site",
+      TRUE ~ plot)) |> 
+  uncount(number) |> 
+  select(date.time, date, time, site, plot, location, detection, common.name, scientific.name, genus, family, class,assessment.method,season,trip, participants,
+         temperature.C, barometric.pressure.mbar, `cloud cover.%`, max.wind.kmh, average.wind.kmh, `humidity.%`, rain, start, end, regenerated.tail, notes)
+```
+
+Save cleaned and merged data frame.
+
+```{r}
+write_csv(trip2, "../data/processed/data_trip2.csv")
+```
+
+### Combine Trips
+
+```{r}
+trip1 <- read_csv("../data/processed/data_trip1.csv")
+trip2 <- read_csv("../data/processed/data_trip2.csv")
+
+all_trips <- rbind(trip1,trip2)
+```
+
+```{r}
+write_csv(all_trips, "../data/processed/data_all_trips.csv")
+```
+
+## Camera traps
+
+Camera trapping data from Wildlife Insights
+
+```{r}
+cam <- read_csv("../data/raw/images_2007126.csv") |> 
+  unite(scientific.name, c(genus, species), sep = " ", remove = FALSE) |> 
+  mutate(scientific.name = case_when(
+      scientific.name == "NA NA" ~ NA_character_,
+    TRUE ~ scientific.name),
+    scientific.name = coalesce(scientific.name, individual_animal_notes),
+    scientific.name = case_when(
+      family == "Felidae" ~ "Felis catus",
+      common_name == "Kangaroo Family" ~ "Macropodidae",
+      common_name == "Woodrat or Rat Species" ~ "Rattus",
+      common_name == "Reptile" & is.na(scientific.name) ~ "Carlia munda",
+      common_name == "Bandicoot" ~ "Isoodon macrourus",
+      TRUE ~ scientific.name),
+    scientific.name = fct_recode(scientific.name,
+                          "Notamacropus agilis" = "Macropus agilis",
+                          "Notamacropus parryi" = "Macropus parryi",
+                          "Varanus panoptes panoptes" = "Varanus panoptes"),
+    plot = case_when(deployment_id %in% c("11 2/2", "11 rest", "IB 1/2", "11 10/07/2024") ~ "11",
+                     deployment_id %in% c("103 rest 0", "B6 1/2 0","103 10/07/2024") ~ "103",
+                     deployment_id %in% c("107 rest 0", "Aa 1/2", "AA 2/2", "107 10/07/2024") ~ "107",
+                     deployment_id %in% c("101 all", "101  10/07/2024") ~ "101",
+                     deployment_id %in% c("40 07/10/2024") ~ "40",
+                     deployment_id %in% c("50 rest","50 10/07/2024") ~ "50",
+                     deployment_id %in% c("70 all", "70 11/24/2023") ~ "70",
+                     deployment_id %in% c("23 11/26/2023", "23 10/07/2024") ~ "23",
+                     deployment_id %in% c("76 all") ~ "76",
+                     deployment_id %in% c("99 all", "99 10/07/2024") ~ "99"),
+    site = case_when(
+           plot %in% c("11","76","99","103", "107") ~ "wet_site",
+           plot %in% c("23","40", "50", "70", "101") ~ "dry_site",
+           TRUE ~ plot),
+    season = case_when(
+           month(timestamp) %in% c(10, 11, 12, 1, 2, 3, 4) ~ "wet",
+           TRUE ~ "wet"),
+    trip = case_when(
+           timestamp >= ymd("2023-11-01") & timestamp <= ymd("2024-02-29") ~ "trip1",
+           timestamp >= ymd("2024-07-01") & timestamp <= ymd("2024-09-30") ~ "trip2",
+           TRUE ~ "adj_datetime"),
+    date = as_date(timestamp),
+    time = format(timestamp, "%H:%M:%S")) |> 
+  select(date.time = timestamp, date, time, site, plot, scientific.name, class, image_id, season, trip) |> 
+  add_column(detection = "seen",
+             location = "on",
+             assessment.method = "camera") |> 
+  left_join(sp_reference)
+```
+
+```{r}
+write_csv(cam, "../data/processed/camera_trapping_data.csv")
+```
+
+## PAM data
+
+### BirdNET-Analyzer
+
+```{r}
+txt_files <- list.files(path = "../data/raw/BirdNET_detections/", pattern = "*.txt", full.names = TRUE, recursive = TRUE)
+
+birdnet <- txt_files |>
+  purrr::map(read_delim, 
+      delim = "\t",  # tab as the delimiter between columns
+      show_col_types = FALSE,
+      col_types = cols(.default = "c")) |>  # Read all columns as character
+  bind_rows() |> 
+  mutate(plot = str_extract(`Begin File`, "(?<=_)[^_]+(?=_)"),
+         datetime = ymd_hms(str_extract(`Begin File`, "^\\d{8}T\\d{6}"),
+                            tz = "Australia/Sydney"),
+         adj_datetime = datetime + seconds(`Begin Time (s)`))
+
+```
+
+Now we need to filter out low BirdNET Confidence scores. The threshold is extremely variable and there is no one-for all solution but Perez-Granados et al. 2023 (https://onlinelibrary.wiley.com/doi/10.1111/ibi.13193) and Sethi et al. 2021 (https://brage.nina.no/nina-xmlui/bitstream/handle/11250/2832294/ninarapport2064.pdf?sequence=4&isAllowed=y) has suggested 0.7-0.8 for most studies.
+
+```{r}
+birdnet_likely <- birdnet |> 
+  filter(Confidence > 0.75)
+```
+
+
+BirdNET out of the box has not been trained very well with Australian bird species and therefore gets a fair few wrong. So we need to manually exclude some of those really unlikely ones based on distribution records on eBird.
+
+BirdNET species lists for each recorder based on occurrence data and time of year. These were created with the BirdNET-Analyzer GUI and a threshold of 0.03 (3% likelihood.
+
+```{r}
+txt_files <- list.files(path = "../data/raw/BirdNet_likely_species/", pattern = "*.txt", full.names = TRUE, recursive = TRUE)
+
+BirdNET_sp_lists <- txt_files |>
+  purrr::map(read_delim, 
+      delim = "_",
+      col_names = c("scientific.name", "Common Name"),
+      show_col_types = FALSE,
+      col_types = cols(.default = "c")) |>
+  bind_rows() |> 
+  distinct()
+```
+
+```{r}
+matching_species <- birdnet_likely |>
+  semi_join(BirdNET_sp_lists, by = "Common Name") |> 
+  rename(common.name = `Common Name`)
+```
+
+Even after setting the Confidence to 0.75 and restricting the species list to region and time of year, we still need to be cautious about some of the IDs and take them with a grain of salt. They would likely need validation to be sure as the Australian birds in BirdNET aren't as well represented and trained for.
+
+Now we need to clean up the species names.
+
+```{r}
+sp_reference <- read_csv("../data/processed/database.csv")
+
+birdnet_cleaned <- matching_species |> 
+  mutate(common.name = str_replace(common.name, "Gray", "Grey"),
+         common.name = fct_recode(common.name,
+                                  "Australian Boobook" = "Southern Boobook",
+                                  "Bush Stone-curlew" = "Bush Thick-knee",
+                                  "Beach Stone-curlew" = "Beach Thick-knee",
+                                  "Sahul Sunbird" = "Olive-backed Sunbird",
+                                  "Eastern Barn Owl" = "Barn Owl",
+                                  "Sahul Brush Cuckoo" = "Brush Cuckoo",
+                                  "Sahul Cicadabird" = "Common Cicadabird",
+                                  "Papuan Eclectus" = "Eclectus Parrot",
+                                  "Australian Rufous Fantail" = "Rufous Fantail",
+                                  "Eastern Cattle-Egret" = "Cattle Egret",
+                                  "Australian Spectacled Monarch" = "Spectacled Monarch")) |> 
+  left_join(sp_reference, by = "common.name") |> 
+  mutate(plot = str_remove(plot, "^R"),
+         site = case_when(
+           plot %in% c("11","76","99","103", "107") ~ "wet_site",
+           plot %in% c("23","40", "50", "70", "101") ~ "dry_site",
+           TRUE ~ plot),
+         season = case_when(
+           month(adj_datetime) %in% c(10, 11, 12, 1, 2, 3, 4) ~ "wet",
+           TRUE ~ "wet"),
+         trip = case_when(
+           adj_datetime >= ymd("2023-11-01") & adj_datetime <= ymd("2024-02-29") ~ "trip1",
+           adj_datetime >= ymd("2024-07-01") & adj_datetime <= ymd("2024-09-30") ~ "trip2",
+           TRUE ~ "adj_datetime"),
+         `Begin Time (s)` = as.numeric(`Begin Time (s)`),
+         `End Time (s)` = as.numeric(`End Time (s)`),
+         file_number = str_extract(`Begin File`, "\\d+(?=\\.wav)"),
+         AudioLink = sprintf("https://api.ecosounds.org/audio_recordings/%s/media.wav?start_offset=%.1f&end_offset=%.1f",
+                             file_number,
+                             `Begin Time (s)` - 3.5,
+                             `End Time (s)` + 3.5),
+         file_number = NULL) |> 
+  select(date.time = adj_datetime, site, plot,common.name, scientific.name,genus, family, trip, season, Confidence, AudioLink)
+```
+
+```{r}
+write_csv(birdnet_cleaned, "../data/processed/pam_data.csv")
+```
+
+### Embeddings
+
+#### FrogID species prediction
+
+Extract a frog species list based on FrogID SDMs and the recording locations to know what frogs to look for.
+
+```{r}
+
+# Get list of .shp files
+shp_files <- list.files(path = "/Users/sebastianhoefer/Documents/Research/GIS/FrogID_species_distribution/2024/",
+                        pattern = "\\.shp$", full.names = TRUE)
+
+# Read in study_sites data
+sites <- read_csv("../data/processed/study_sites.csv")
+
+survey_sites_sf <- st_as_sf(sites, coords = c("lon", "lat"), crs=4326)
+
+
+df_list <- map(shp_files, function(file) {
+  tryCatch(
+    {
+      # Read .shp file
+      t <- st_read(file)
+      
+      # Check and try to fix if invalid
+      if (any(!st_is_valid(t))) {
+        message(paste("Invalid geometries in", file))
+        
+        if ("lwgeom" %in% installed.packages()) {
+          library(lwgeom)
+          t <- st_make_valid(t)
+        } else {
+          t <- t[st_is_valid(t), ]
+        }
+      }
+      
+      # Transform 
+      t <- st_transform(t, 4326)
+      
+      # Operation
+      joined_data <- st_join(survey_sites_sf, t, left=TRUE)
+      
+      # Get the file name without the extension
+      filename <- tools::file_path_sans_ext(basename(file))
+      
+      # Check if the Species column exists
+      if ("Species" %in% names(joined_data)) {
+        joined_data2 <- joined_data %>%
+          mutate(presence = if_else(is.na(Species), "0", "1")) %>%
+          mutate(Species = filename) %>%
+          select(location, Species, presence)
+        
+        # print some metrics for assessment
+        message(paste("Processed ", file, " with ", nrow(joined_data2), " rows and ", length(names(joined_data2)), " columns."))
+        
+        return(joined_data2)
+      } else {
+        message(paste("Species column not found in", file))
+        return(tibble())  # return an empty dataframe
+      }
+    },
+    error = function(cond) {
+      message(paste("Error in processing file: ", file))
+      message("Here is the original error message:")
+      message(cond$message)
+      return(tibble())  # Returns an empty dataframe, and still passes to the next file
+    }
+  )
+})
+
+
+frogs <- bind_rows(df_list) %>% 
+  mutate(Species = str_replace_all(Species, "_", " "),
+         presence = as.numeric(presence)) %>% 
+  st_set_geometry(NULL) %>% 
+  pivot_wider(names_from = "location", values_from = "presence") %>% 
+  replace(is.na(.), "0") %>% 
+  select(Species, everything()) %>%
+  filter(rowSums(select(.,where(is.numeric))) > 0)
+  
+write_csv(frogs, "../data/processed/FrogID_SDM_presence.csv")
+```
+
+#### Data preparation
+
+```{r}
+
+```
+
+
+# ANALYSIS
 
 ## Load data
 
 ```{r}
-tropwater_data <- read_csv("../data/processed/data_trip1.csv")
+tropwater_data <- read_csv("../data/processed/data_all_trips.csv") |> 
+  filter(!plot %in% c("Road", "Einasleigh")) |> 
+  mutate(plot = as.factor(plot))
+
+pam_data <- read_csv("../data/processed/pam_data.csv") |> 
+  add_column(assessment.method = "PAM",
+             class = "Aves") |> 
+  mutate(date = as_date(date.time),
+    time = hms::as_hms(date.time),
+    plot = as.factor(plot))
+
+cam_data <- read_csv("../data/processed/camera_trapping_data.csv") |> 
+  mutate(plot = as.factor(plot)) |> 
+  filter(!scientific.name %in% c("Rattus", "Macropodidae", "Coturnix NA"))
+
+#Join all data frames
+
+data <- list(tropwater_data, cam_data, pam_data) |> 
+  reduce(full_join) |> 
+  mutate(survey.method = assessment.method,
+         assessment.method = case_when(
+           assessment.method == "PAM" ~ "PAM",
+           assessment.method == "camera" ~ "camera",
+           assessment.method %in% c("birding", "spotlighting", "incidentals") ~ "OBM"))
+```
+
+## Abundance
+
+```{r}
+#| fig-width: 15
+#| fig-asp: 0.4
+
+(abund_plot <- ggplot(data, aes(class, fill = site)) +
+  geom_bar(position = position_dodge2(width = 0.6)) +
+  facet_wrap(~assessment.method, scales = "free_y") +
+  my.theme() +
+  scale_y_continuous(name = "Detections",
+                     labels = scales::comma) +
+  scale_x_discrete(name = "")) +
+  scale_fill_manual(values = c("coral", "steelblue")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(2, "lines"))
 ```
 
 ```{r}
-ggplot(tropwater_data, aes(class, fill = plot)) +
-  geom_bar()
+#| fig-width: 15
+#| fig-asp: 0.6
+
+(abund_plot2 <- ggplot(data, aes(trip, fill = site)) +
+  geom_bar(position = position_dodge2(width = 0.6)) +
+  facet_wrap(~class, scales = "free_y") +
+  my.theme() +
+  scale_y_continuous(name = "Detections",
+                     labels = scales::comma) +
+  scale_x_discrete(name = "")) +
+  scale_fill_manual(values = c("coral", "steelblue")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(2, "lines"))
+```
+
+```{r}
+ggsave("../output/abund_plot_trips.png", abund_plot2, width = 15, height = 15*0.6, dpi = 300)
+```
+
+## Species richness
+
+```{r}
+sp_rich <- data |> 
+  group_by(site, common.name, class, assessment.method) |>  
+  distinct(scientific.name) |>  
+  ungroup()
+
+sp_rich_b <- data |> 
+  group_by(site, common.name, class, trip) |>  
+  distinct(scientific.name) |>  
+  ungroup()
+```
+
+```{r}
+#| fig-width: 15
+#| fig-asp: 0.4
+
+(richness_plot <- ggplot(sp_rich, aes(class, fill = site)) +
+  geom_bar(position = position_dodge2(width = 0.6)) +
+  facet_wrap(~assessment.method, scales = "free_y") +
+  my.theme() +
+  scale_y_continuous(name = "Species Richness",
+                     labels = scales::comma) +
+  scale_x_discrete(name = "")) +
+  scale_fill_manual(values = c("coral", "steelblue")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(2, "lines"))
+```
+
+```{r}
+#| fig-width: 15
+#| fig-asp: 0.6
+
+(richness_plot2 <- ggplot(sp_rich_b, aes(trip, fill = site)) +
+  geom_bar(position = position_dodge2(width = 0.6)) +
+  facet_wrap(~class, scales = "free_y") +
+  my.theme() +
+  scale_y_continuous(name = "Species Richness",
+                     labels = scales::comma) +
+  scale_x_discrete(name = "")) +
+  scale_fill_manual(values = c("coral", "steelblue")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(2, "lines"))
+```
+
+```{r}
+ggsave("../output/richness_plot_trips.png", richness_plot2, width = 15, height = 15*0.6, dpi = 300)
+```
+
+## Combined plots
+
+```{r}
+#| fig-width: 20
+#| fig-asp: 0.8
+
+(combined_plots <- richness_plot / abund_plot +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",
+        axis.text.x = element_text(angle = 45, hjust = 1)) &
+  scale_fill_manual(values = c("coral", "steelblue")))
+```
+
+```{r}
+ggsave("../output/richness_plots.png", combined_plots, width = 20, height = 20*0.8, dpi = 300)
+```
+
+```{r}
+sp_rich2 <- tropwater_data |> 
+  group_by(season, common.name, class) |> 
+  summarise(richness = length(unique(scientific.name)))
+```
+
+
+## Chao2 species richness
+
+```{r}
+tropwater_data <- read_csv("../data/processed/data_all_trips.csv")
+
+data_summed <- tropwater_data |> 
+  filter(!plot %in% c("Road", "Einasleigh")) |> 
+  group_by(season, scientific.name, class) |> 
+  count(common.name) |> 
+  ungroup()
+```
+
+```{r}
+presence_absence <- data_summed %>%
+  # Select the relevant columns
+  select(common.name, season, class) %>%
+  # Mark presence (1) for each species per site, plot and date
+  distinct() %>%
+  mutate(Presence = 1) %>%
+  # Reshape the data into wide format
+  pivot_wider(names_from = common.name, 
+              values_from = Presence, 
+              values_fill = list(Presence = 0))
 ```
 
 
 
+Number of recording days
+
+```{r}
+pam_data |> 
+  group_by(season, plot) |> 
+  summarise(unique_days = n_distinct(as_date(adj_datetime)))
+```
+
+## TRYING STUFF
+
+```{r}
+tropwater_data <- read_csv("../data/processed/data_all_trips.csv")
+
+data_summed <- tropwater_data |> 
+  filter(!plot %in% c("Road", "Einasleigh")) |> 
+  group_by(date, site, plot,trip, season, scientific.name) |> 
+  count(common.name) |> 
+  ungroup()
+```
+
+```{r}
+presence_absence <- data_summed %>%
+  # Select the relevant columns
+  select(common.name, site, plot, date) %>%
+  # Mark presence (1) for each species per site, plot and date
+  distinct() %>%
+  mutate(Presence = 1) %>%
+  # Reshape the data into wide format
+  pivot_wider(names_from = common.name, 
+              values_from = Presence, 
+              values_fill = list(Presence = 0))
+```
+
+
+```{r}
+# Create function to process each site-plot combination
+process_sac <- function(data, site_name, plot_name) {
+  # Skip if no species present
+  if (ncol(data) == 0 || nrow(data) == 0) return(NULL)
+  
+  data_matrix <- data |>
+    mutate(across(everything(), as.numeric)) |>
+    as.matrix()
+  
+  # Calculate SAC and Chao2
+  sac <- specaccum(data_matrix, method = "random", permutations = 100)
+  chao2_est <- chao2(data_matrix, taxa.row = FALSE)
+  
+  # Create plot data
+  sac_df <- tibble(
+    Richness = sac$richness,
+    Sites = seq_along(sac$richness),
+    SD = sac$sd,
+    site = site_name,
+    plot = plot_name
+  )
+  
+  # Create and save plot
+  p <- ggplot(sac_df, aes(x = Sites, y = Richness)) +
+    geom_line() +
+    geom_point() +
+    geom_errorbar(aes(ymin = Richness - SD, ymax = Richness + SD), width = 0.2) +
+    labs(title = paste("SAC for", site_name, "-", plot_name),
+         x = "Number of Sites",
+         y = "Species Richness") +
+    my.theme()
+  
+  # Save outputs
+  write_csv(data, 
+           file = str_glue("output/presence_absence_{str_replace_all(site_name, ' ', '_')}_{str_replace_all(plot_name, ' ', '_')}.csv"))
+  
+  ggsave(str_glue("output/SAC_{str_replace_all(site_name, ' ', '_')}_{str_replace_all(plot_name, ' ', '_')}.png"),
+         plot = p,
+         width = 8, height = 5, dpi = 300)
+  
+  # Return results
+  list(
+    sac = sac,
+    chao2 = chao2_est,
+    plot = p,
+    data = sac_df
+  )
+}
+
+# Then run the full process
+results <- presence_absence |>
+  group_by(site, plot) |>
+  nest() |>
+  mutate(
+    results = purrr::pmap(
+      .l = list(
+        data = data,
+        site_name = site,
+        plot_name = plot
+      ),
+      .f = process_sac
+    )
+  ) |>
+  ungroup()
+
+# Extract results
+survey_sac_list <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  purrr::map("sac")
+
+survey_chao2_list <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  purrr::map("chao2")
+```
+
+```{r}
+process_sac <- function(data, site_name, plot_name) {
+  print(paste("Processing:", site_name, plot_name))
+  print("Data structure:")
+  print(str(data))
+  
+  # Skip if no species present
+  if (ncol(data) == 0 || nrow(data) == 0) {
+    print("Skipping: no data")
+    return(NULL)
+  }
+  
+  # Convert data to numeric matrix
+  data_matrix <- data |>
+    mutate(across(everything(), as.numeric)) |>
+    as.matrix()
+  
+  print("Converted data structure:")
+  print(str(data_matrix))
+  
+  tryCatch({
+    print("Attempting SAC calculation...")
+    sac <- specaccum(data_matrix, permutations = 100)
+    print("SAC calculated successfully")
+    
+    print("Attempting Chao2 calculation...")
+    chao2_est <- chao2(data_matrix, taxa.row = FALSE)
+    print("Chao2 calculated successfully")
+    
+    # Create plot data
+    sac_df <- tibble(
+      Richness = sac$richness,
+      Sites = seq_along(sac$richness),
+      SD = sac$sd,
+      site = site_name,
+      plot = plot_name
+    )
+    
+    # Create and save plot
+    p <- ggplot(sac_df, aes(x = Sites, y = Richness)) +
+      geom_line() +
+      geom_point() +
+      geom_errorbar(aes(ymin = Richness - SD, ymax = Richness + SD), width = 0.2) +
+      labs(title = paste("SAC for", site_name, "-", plot_name),
+           x = "Number of Sites",
+           y = "Species Richness") +
+      theme_minimal()
+    
+    list(
+      sac = sac,
+      chao2 = chao2_est,
+      plot = p,
+      data = sac_df
+    )
+  }, error = function(e) {
+    print(paste("Error occurred:", e$message))
+    return(NULL)
+  })
+}
+
+# Then run the full process
+results <- presence_absence |>
+  group_by(site, plot) |>
+  nest() |>
+  mutate(
+    results = purrr::pmap(
+      .l = list(
+        data = data,
+        site_name = site,
+        plot_name = plot
+      ),
+      .f = process_sac
+    )
+  ) |>
+  ungroup()
+
+# Extract results
+survey_sac_list <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  purrr::map("sac")
+
+survey_chao2_list <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  purrr::map("chao2")
+
+```
+
+```{r}
+(sac_plots <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  purrr::map("plot"))
+```
+
+```{r}
+sac_data <- results |>
+  filter(!map_lgl(results, is.null)) |>
+  pull(results) |>
+  map_dfr("data", .id = "group")
+```
+
+
+```{r}
+unique_locations <- unique(presence_absence$Location)
+
+# Create a list to store the SACs
+survey_sac_list <- list()
+survey_chao2_list <- list()
+
+# Loop through each unique Location
+for (location in unique_locations) {
+  
+  # Filter data for the current Location
+  location_data <- presence_absence %>%
+    filter(Location == location)
+  
+  # Get unique Points within this Location
+  unique_points <- unique(location_data$Point)
+  
+  # Loop through each Point within the current Location
+  for (point in unique_points) {
+    
+    # Filter data for this specific Location and Point combination
+    point_data <- location_data %>%
+      filter(Point == !!point) %>%
+      select(-Location, -Point, -date)  # Drop non-species columns
+    
+    # Skip if there are no species present
+    if (ncol(point_data) == 0 || nrow(point_data) == 0) {
+      next
+    }
+    
+    # Save the presence-absence matrix as a CSV file
+    write_csv(point_data, 
+              file = paste0("presence_absence_", gsub(" ", "_", location), "_", gsub(" ", "_", point), ".csv"))
+    
+    # Calculate species accumulation curve
+    sac <- specaccum(point_data, permutations = 100)  # Increase permutations for a better estimate
+    
+    # Store the result in the list
+    survey_sac_list[[paste(location, point, sep = "_")]] <- sac
+    
+    # Calculate Chao2 richness estimate
+    chao2_estimate <- chao2(point_data, taxa.row = FALSE)
+    survey_chao2_list[[paste(location, point, sep = "_")]] <- chao2_estimate
+    
+    # Create a data frame for ggplot
+    sac_df <- data.frame(
+      Richness = sac$richness,
+      Sites = 1:length(sac$richness),
+      SD = sac$sd  # Standard deviations
+    )
+    
+    # Generate the plot
+    p <- ggplot(sac_df, aes(x = Sites, y = Richness)) +
+      geom_line() +
+      geom_point() +
+      geom_errorbar(aes(ymin = Richness - SD, ymax = Richness + SD), width = 0.2) +  # Error bars
+      labs(title = paste("SAC for", location, "-", point),
+           x = "Number of Sites",
+           y = "Species Richness") +
+      theme_minimal()
+    
+    # Print the plot (optional)
+    print(p)
+    
+    # Save the plot as a PNG file (optional)
+    ggsave(filename = paste0("SAC_", gsub(" ", "_", location), "_", gsub(" ", "_", point), ".png"),
+           plot = p,
+           width = 8, height = 5, dpi = 300)
+  }
+}
+
+survey_sac_list
+
+# Initialize an empty list to store the data frames
+survey_sac_data_list <- list()
+
+# Loop through the sac_list to extract relevant data
+for (plot in names(survey_sac_list)) {
+  sac <- survey_sac_list[[plot]]
+  
+  # Create a data frame for the current plot
+  sac_df <- data.frame(
+    Plot = plot,
+    Sites = 1:length(sac$richness),
+    Richness = sac$richness,
+    SD = sac$sd
+  )
+  
+  # Append to the list
+  survey_sac_data_list[[plot]] <- sac_df
+}
+
+# Combine all data frames into one
+survey_sac_combined_df <- bind_rows(survey_sac_data_list)
+
+# View the combined data frame
+print(survey_sac_combined_df)
+
+# Optionally, save the combined data frame to a CSV file
+write.csv(sac_combined_df, "BirdSurvey_sac_combined_data.csv", row.names = FALSE)
+
+
+survey_chao2_list
+
+
+# Convert chao2_list to a data frame
+chao2_df <- do.call(rbind, lapply(names(survey_chao2_list), function(name) {
+  # Extract location and point from the name
+  location_point <- strsplit(name, "_")[[1]]
+  
+  # Create a data frame for each entry
+  data.frame(
+    Location = location_point[1],
+    Point = location_point[2],
+    Chao2_Estimate = survey_chao2_list[[name]],
+    stringsAsFactors = FALSE
+  )
+}))
+
+# View the resulting data frame
+print(chao2_df)
+
+# Optionally save the data frame as a CSV file
+write_csv(chao2_df, "BirdSurvey_chao2_estimates.csv")
+```
+
+## Ordination
+
+### NMDS
+
+```{r}
+
+```
+
+### MVABUND
+
+#### BioClim
+
+Extract BioClim data for MVAbund analysis.
+
+Load packages
+
+```{r}
+library(geodata)
+library(terra)
+library(sp)
+```
+
+```{r}
+# Download WorldClim data (BioClim variables at 10 arc minutes resolution)
+worldclim_data <- worldclim_global(var = "bio", res = 10, path = tempdir())
+
+# Define the coordinates (longitude, latitude) of interest
+coords <- read_csv("../data/processed/study_sites.csv")
+
+#convert to a geo object
+survey_sites_sf <- st_as_sf(sites, coords = c("lon", "lat"), crs=4326)
+
+# Extract the WorldClim data for these points
+extracted_data <- extract(worldclim_data, survey_sites_sf)
+
+# Combine the coordinates with the extracted data
+result <- cbind(coords, extracted_data)
+
+# Export the dataframe as a CSV file
+write_csv(result, "../data/processed/site_clim_data.csv")
+```
+
+Meaning of Bioclim variables:
+
+BIO1 = Annual Mean Temperature
+
+BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
+
+BIO3 = Isothermality (BIO2/BIO7) (×100)
+
+BIO4 = Temperature Seasonality (standard deviation ×100)
+
+BIO5 = Max Temperature of Warmest Month
+
+BIO6 = Min Temperature of Coldest Month
+
+BIO7 = Temperature Annual Range (BIO5-BIO6)
+
+BIO8 = Mean Temperature of Wettest Quarter
+
+BIO9 = Mean Temperature of Driest Quarter
+
+BIO10 = Mean Temperature of Warmest Quarter
+
+BIO11 = Mean Temperature of Coldest Quarter
+
+BIO12 = Annual Precipitation
+
+BIO13 = Precipitation of Wettest Month
+
+BIO14 = Precipitation of Driest Month
+
+BIO15 = Precipitation Seasonality (Coefficient of Variation)
+
+BIO16 = Precipitation of Wettest Quarter
+
+BIO17 = Precipitation of Driest Quarter
+
+BIO18 = Precipitation of Warmest Quarter
+
+BIO19 = Precipitation of Coldest Quarter
+
+#### Analysis
+
+```{r}
+
+```
 

@@ -3,3 +3,6 @@ Tropwater_waterholes.Rproj
 .Rhistory
 .RData
 .Ruserdata
+/tropwater_pam_analysis*
+/data*
+/output*
